@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LayerBrain | Red neuronal 3D</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #080d18;
+      --panel: rgba(17, 26, 43, .92);
+      --text: #edf3ff;
+      --muted: #9aaac4;
+      --accent: #65dcff;
+      --fire: #ffb547;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      overflow: hidden;
+      color: var(--text);
+      background: radial-gradient(ellipse at 50% 45%, #172747 0%, var(--bg) 70%);
+      font: 14px/1.4 "Segoe UI", system-ui, sans-serif;
+    }
+    header {
+      position: absolute;
+      z-index: 2;
+      inset: 18px 20px auto;
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      pointer-events: none;
+    }
+    h1 { margin: 0 0 4px; font-size: 20px; letter-spacing: .04em; }
+    #subtitle, #status { color: var(--muted); }
+    #status { text-align: right; }
+    canvas { width: 100vw; height: 100vh; display: block; cursor: grab; }
+    canvas:active { cursor: grabbing; }
+    .panel {
+      position: absolute;
+      z-index: 2;
+      left: 50%;
+      bottom: 18px;
+      width: min(760px, calc(100vw - 28px));
+      transform: translateX(-50%);
+      padding: 12px 16px 10px;
+      border: 1px solid rgba(130, 170, 230, .2);
+      border-radius: 14px;
+      background: var(--panel);
+      box-shadow: 0 10px 40px #0008;
+      backdrop-filter: blur(12px);
+    }
+    .controls { display: flex; align-items: center; gap: 10px; }
+    button {
+      border: 1px solid #425573;
+      border-radius: 8px;
+      padding: 7px 12px;
+      color: var(--text);
+      background: #202f4a;
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--accent); }
+    input[type="range"] { min-width: 80px; flex: 1; accent-color: var(--accent); }
+    .legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 8px; color: var(--muted); font-size: 12px; }
+    .dot { display: inline-block; width: 9px; height: 9px; margin-right: 5px; border-radius: 50%; background: var(--accent); }
+    .dot.fire { background: var(--fire); box-shadow: 0 0 9px var(--fire); }
+    .line { display: inline-block; width: 18px; margin: 0 5px 3px 0; border-top: 2px solid #54708f; }
+    .line.route { border-color: var(--accent); }
+    #frameLabel { min-width: 190px; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .hint { position: absolute; right: 20px; bottom: 118px; color: #8292ad; font-size: 12px; }
+    @media (max-width: 560px) {
+      header { inset: 12px; }
+      h1 { font-size: 17px; }
+      #status { max-width: 42%; font-size: 11px; }
+      .hint { display: none; }
+      .panel { bottom: 10px; padding: 10px; }
+      #frameLabel { min-width: 120px; font-size: 11px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>LayerBrain · actividad neuronal 3D</h1>
+      <div id="subtitle">Pulso visual de la ruta: avanza por sinapsis reales, priorizando la neurona conectada más cercana. No representa spikes medidos.</div>
+    </div>
+    <div id="status"></div>
+  </header>
+  <canvas id="scene" aria-label="Visualización tridimensional de una red neuronal"></canvas>
+  <div class="hint">Arrastra para rotar · rueda para acercar/alejar</div>
+  <section class="panel">
+    <div class="controls">
+      <button id="toggle" type="button">▶ Reproducir</button>
+      <input id="timeline" type="range" min="0" value="0">
+      <span id="frameLabel"></span>
+    </div>
+    <div class="legend">
+      <span><i class="dot"></i>Neurona en reposo</span>
+      <span><i class="dot fire"></i>Neurona encendida por el pulso</span>
+      <span><i class="line route"></i>Sinapsis recorrida</span>
+      <span><i class="line"></i>Sinapsis</span>
+    </div>
+  </section>
+  <script>
+    const DATA = __NETWORK_DATA__;
+    const canvas = document.getElementById("scene");
+    const context = canvas.getContext("2d");
+    const slider = document.getElementById("timeline");
+    const toggle = document.getElementById("toggle");
+    const frameLabel = document.getElementById("frameLabel");
+    const status = document.getElementById("status");
+    const frames = DATA.frames;
+    slider.max = Math.max(0, frames.length - 1);
+
+    const positions = [];
+    const layerColors = ["#68dfff", "#83a8ff", "#bd91ff", "#70e5bb", "#ffbd68", "#ff7fa9"];
+    DATA.layers.forEach((layer, layerIndex) => {
+      const nodes = [];
+      const count = layer.size;
+      for (let nodeIndex = 0; nodeIndex < count; nodeIndex++) {
+        const angle = nodeIndex * 2.399963229728653;
+        const radius = Math.sqrt((nodeIndex + .5) / count) * 1.85;
+        nodes.push({
+          x: (layerIndex - (DATA.layers.length - 1) / 2) * 4.2,
+          y: Math.cos(angle) * radius,
+          z: Math.sin(angle) * radius
+        });
+      }
+      positions.push(nodes);
+    });
+
+    let yaw = -.35, pitch = .12, zoom = 1, dragging = false;
+    let lastX = 0, lastY = 0, playing = false, animationTimer = null;
+    let pulseStage = 0;
+    const resize = () => {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      canvas.width = Math.round(canvas.clientWidth * dpr);
+      canvas.height = Math.round(canvas.clientHeight * dpr);
+      context.setTransform(dpr, 0, 0, dpr, 0, 0);
+      render();
+    };
+    window.addEventListener("resize", resize);
+
+    function project(point) {
+      const cy = Math.cos(yaw), sy = Math.sin(yaw);
+      const cp = Math.cos(pitch), sp = Math.sin(pitch);
+      const x = point.x * cy - point.z * sy;
+      const z1 = point.x * sy + point.z * cy;
+      const y = point.y * cp - z1 * sp;
+      const z = point.y * sp + z1 * cp;
+      const focal = Math.min(canvas.clientWidth, canvas.clientHeight) * .72 * zoom;
+      const scale = focal / (focal + z * 45 + 220);
+      return {
+        x: canvas.clientWidth / 2 + x * focal / 7.5 * scale,
+        y: canvas.clientHeight / 2 + y * focal / 7.5 * scale,
+        z,
+        scale
+      };
+    }
+
+    function buildPulsePath(frame) {
+      const route = new Set(frame.active_connections || []);
+      const groupsByConnection = new Map();
+      for (const edge of DATA.connections) {
+        if (!route.has(edge[4])) continue;
+        if (!groupsByConnection.has(edge[4])) groupsByConnection.set(edge[4], []);
+        groupsByConnection.get(edge[4]).push(edge);
+      }
+      const groups = [...groupsByConnection.values()]
+        .sort((a, b) => a[0][0] - b[0][0]);
+      if (!groups.length) return {nodes: [], edges: []};
+
+      const memo = new Map();
+      function completePath(groupIndex, sourceNeuron) {
+        const key = `${groupIndex}:${sourceNeuron}`;
+        if (memo.has(key)) return memo.get(key);
+        const candidates = groups[groupIndex]
+          .filter((edge) => edge[1] === sourceNeuron)
+          .map((edge) => {
+            const from = positions[edge[0]][edge[1]];
+            const to = positions[edge[2]][edge[3]];
+            const distance = (from.y - to.y) ** 2 + (from.z - to.z) ** 2;
+            const tail = groupIndex + 1 < groups.length
+              ? completePath(groupIndex + 1, edge[3])
+              : {nodes: [[edge[2], edge[3]]], edges: [], cost: 0};
+            if (!tail) return null;
+            return {
+              nodes: [[edge[0], edge[1]], ...tail.nodes],
+              edges: [edge, ...tail.edges],
+              cost: distance + tail.cost
+            };
+          })
+          .filter(Boolean)
+          .sort((a, b) => {
+            const from = positions[groups[groupIndex][0][0]][sourceNeuron];
+            const aEdge = a.edges[0];
+            const bEdge = b.edges[0];
+            const aTarget = positions[aEdge[2]][aEdge[3]];
+            const bTarget = positions[bEdge[2]][bEdge[3]];
+            const aDistance = (from.y - aTarget.y) ** 2 + (from.z - aTarget.z) ** 2;
+            const bDistance = (from.y - bTarget.y) ** 2 + (from.z - bTarget.z) ** 2;
+            return aDistance - bDistance || a.cost - b.cost;
+          });
+        const best = candidates[0] || null;
+        memo.set(key, best);
+        return best;
+      }
+
+      const rootLayer = groups[0][0][0];
+      const observed = (frame.spikes && frame.spikes[String(rootLayer)]) || [];
+      const possibleRoots = [...new Set(groups[0].map((edge) => edge[1]))];
+      const observedRoots = observed.filter((neuron) => possibleRoots.includes(neuron));
+      const roots = observedRoots.length ? observedRoots : possibleRoots;
+      const candidates = roots
+        .map((neuron) => ({
+          neuron,
+          path: completePath(0, neuron),
+          centerDistance: positions[rootLayer][neuron].y ** 2
+            + positions[rootLayer][neuron].z ** 2
+        }))
+        .filter((item) => item.path)
+        .sort((a, b) => a.path.cost - b.path.cost || a.centerDistance - b.centerDistance);
+
+      if (!candidates.length) return {nodes: [], edges: []};
+      const best = candidates[0].path;
+      return {
+        nodes: best.nodes,
+        edges: best.edges
+      };
+    }
+
+    function render() {
+      const width = canvas.clientWidth, height = canvas.clientHeight;
+      context.clearRect(0, 0, width, height);
+      const frame = frames[Number(slider.value)] || {spikes: {}, active_connections: [], epoch: 0, sample: 0, step: 0};
+      const pulsePath = buildPulsePath(frame);
+      pulseStage = Math.min(pulseStage, Math.max(0, pulsePath.nodes.length - 1));
+      const activeNode = pulsePath.nodes[pulseStage];
+      const activeEdge = pulseStage > 0 ? pulsePath.edges[pulseStage - 1] : null;
+
+      DATA.connections.forEach((edge) => {
+        const from = project(positions[edge[0]][edge[1]]);
+        const to = project(positions[edge[2]][edge[3]]);
+        const selected = activeEdge === edge;
+        context.beginPath();
+        context.moveTo(from.x, from.y);
+        context.lineTo(to.x, to.y);
+        context.strokeStyle = selected ? "rgba(101,220,255,.95)" : "rgba(112,143,184,.1)";
+        context.lineWidth = selected ? 2.5 : .55;
+        context.stroke();
+      });
+
+      const drawNodes = [];
+      positions.forEach((layer, layerIndex) => {
+        layer.forEach((point, nodeIndex) => {
+          drawNodes.push({
+            point: project(point),
+            layerIndex,
+            nodeIndex,
+            fired: activeNode && activeNode[0] === layerIndex && activeNode[1] === nodeIndex
+          });
+        });
+      });
+      drawNodes.sort((a, b) => b.point.z - a.point.z);
+      drawNodes.forEach(({point, layerIndex, fired}) => {
+        const radius = (fired ? 7 : 4.5) * point.scale;
+        context.beginPath();
+        context.arc(point.x, point.y, radius, 0, Math.PI * 2);
+        context.fillStyle = fired ? "#ffb547" : layerColors[layerIndex % layerColors.length];
+        context.globalAlpha = fired ? 1 : .72;
+        if (fired) {
+          context.shadowColor = "#ff9f2f";
+          context.shadowBlur = 20;
+        }
+        context.fill();
+        context.shadowBlur = 0;
+        context.globalAlpha = 1;
+      });
+
+      DATA.layers.forEach((layer, index) => {
+        const anchor = project({x: (index - (DATA.layers.length - 1) / 2) * 4.2, y: -2.35, z: 0});
+        context.fillStyle = layerColors[index % layerColors.length];
+        context.font = "12px Segoe UI, sans-serif";
+        context.textAlign = "center";
+        context.fillText(
+          `${layer.name} · ${layer.size} · dendritas ${layer.max_incoming}/${layer.num_dendrites}`,
+          anchor.x,
+          anchor.y
+        );
+      });
+      const firing = activeNode ? 1 : 0;
+      frameLabel.textContent = frame.creation ? "Inicialización · red creada" :
+        `Época ${frame.epoch} · muestra ${frame.sample + 1} · paso ${frame.step + 1} · neurona ${pulseStage + 1}/${Math.max(1, pulsePath.nodes.length)}`;
+      status.textContent = `${DATA.layers.length} capas · ${DATA.neuron_count} neuronas · ${DATA.synapse_count} sinapsis`;
+      document.title = `${firing} pulso visual · LayerBrain`;
+    }
+
+    slider.addEventListener("input", () => {
+      pulseStage = 0;
+      render();
+    });
+    toggle.addEventListener("click", () => {
+      playing = !playing;
+      toggle.textContent = playing ? "❚❚ Pausar" : "▶ Reproducir";
+      if (animationTimer) clearInterval(animationTimer);
+      if (playing) animationTimer = setInterval(() => {
+        const frame = frames[Number(slider.value)] || {};
+        const path = buildPulsePath(frame);
+        if (pulseStage + 1 < path.nodes.length) {
+          pulseStage++;
+        } else {
+          slider.value = (Number(slider.value) + 1) % frames.length;
+          pulseStage = 0;
+        }
+        render();
+      }, 95);
+    });
+    canvas.addEventListener("pointerdown", (event) => {
+      dragging = true; lastX = event.clientX; lastY = event.clientY;
+      canvas.setPointerCapture(event.pointerId);
+    });
+    canvas.addEventListener("pointerup", () => { dragging = false; });
+    canvas.addEventListener("pointermove", (event) => {
+      if (!dragging) return;
+      yaw += (event.clientX - lastX) * .008;
+      pitch = Math.max(-1.1, Math.min(1.1, pitch + (event.clientY - lastY) * .008));
+      lastX = event.clientX; lastY = event.clientY; render();
+    });
+    canvas.addEventListener("wheel", (event) => {
+      zoom = Math.max(.45, Math.min(2.5, zoom * (event.deltaY > 0 ? .92 : 1.08)));
+      render();
+    }, {passive: true});
+    resize();
+  </script>
+</body>
+</html>
